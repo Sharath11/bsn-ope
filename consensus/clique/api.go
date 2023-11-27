@@ -114,36 +114,6 @@ func (api *API) Propose(address common.Address, auth bool) {
 	api.clique.proposals[address] = auth
 }
 
-func (api *API) Votingpercentage(votingType int, percentage uint, auth bool) bool {
-	api.clique.lock.Lock()
-	defer api.clique.lock.Unlock()
-
-	if percentage > 0 && percentage < 100 {
-		for k := range api.clique.signerLimitProposals {
-
-			delete(api.clique.signerLimitProposals, k)
-		}
-		api.clique.signerLimitProposals[percentage] = auth
-		return true
-	} else {
-		return false
-	}
-}
-
-func (api *API) Currentvotingpercentage() uint {
-	api.clique.lock.Lock()
-	defer api.clique.lock.Unlock()
-
-	header := api.chain.CurrentHeader()
-	snapshot, _ := api.clique.snapshot(api.chain, header.Number.Uint64(), header.Hash(), nil)
-	if snapshot != nil {
-		currentVotingPercentage := snapshot.SignerLimit
-		return currentVotingPercentage
-	} else {
-		return 0
-	}
-}
-
 // Discard drops a currently running proposal, stopping the signer from casting
 // further votes (either for or against).
 func (api *API) Discard(address common.Address) {
@@ -235,7 +205,7 @@ func (sb *blockNumberOrHashOrRLP) UnmarshalJSON(data []byte) error {
 }
 
 // GetSigner returns the signer for a specific clique block.
-// Can be called with either a blocknumber, blockhash or an rlp encoded blob.
+// Can be called with a block number, a block hash or a rlp encoded blob.
 // The RLP encoded blob can either be a block or a header.
 func (api *API) GetSigner(rlpOrBlockNr *blockNumberOrHashOrRLP) (common.Address, error) {
 	if len(rlpOrBlockNr.RLP) == 0 {

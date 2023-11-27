@@ -18,7 +18,6 @@ package rawdb
 
 import (
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 )
@@ -30,7 +29,7 @@ import (
 // It is perfectly valid to have destPath == srcPath.
 func copyFrom(srcPath, destPath string, offset uint64, before func(f *os.File) error) error {
 	// Create a temp file in the same dir where we want it to wind up
-	f, err := ioutil.TempFile(filepath.Dir(destPath), "*")
+	f, err := os.CreateTemp(filepath.Dir(destPath), "*")
 	if err != nil {
 		return err
 	}
@@ -117,4 +116,20 @@ func truncateFreezerFile(file *os.File, size int64) error {
 		return err
 	}
 	return nil
+}
+
+// grow prepares the slice space for new item, and doubles the slice capacity
+// if space is not enough.
+func grow(buf []byte, n int) []byte {
+	if cap(buf)-len(buf) < n {
+		newcap := 2 * cap(buf)
+		if newcap-len(buf) < n {
+			newcap = len(buf) + n
+		}
+		nbuf := make([]byte, len(buf), newcap)
+		copy(nbuf, buf)
+		buf = nbuf
+	}
+	buf = buf[:len(buf)+n]
+	return buf
 }

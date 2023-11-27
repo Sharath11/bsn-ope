@@ -1,4 +1,4 @@
-// Copyright 2020 The go-ethereum Authors
+// Copyright 2021 The go-ethereum Authors
 // This file is part of the go-ethereum library.
 //
 // The go-ethereum library is free software: you can redistribute it and/or modify
@@ -18,9 +18,7 @@ package eth
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"github.com/ethereum/go-ethereum/p2p"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
@@ -86,7 +84,7 @@ func serviceNonContiguousBlockHeaderQuery(chain *core.BlockChain, query *GetBloc
 			break
 		}
 		if rlpData, err := rlp.EncodeToBytes(origin); err != nil {
-			log.Crit("Unable to decode our own headers", "err", err)
+			log.Crit("Unable to encode our own headers", "err", err)
 		} else {
 			headers = append(headers, rlp.RawValue(rlpData))
 			bytes += common.StorageSize(len(rlpData))
@@ -381,15 +379,19 @@ func handleBlockBodies66(backend Backend, msg Decoder, peer *Peer) error {
 	}
 	metadata := func() interface{} {
 		var (
-			txsHashes   = make([]common.Hash, len(res.BlockBodiesPacket))
-			uncleHashes = make([]common.Hash, len(res.BlockBodiesPacket))
+			txsHashes        = make([]common.Hash, len(res.BlockBodiesPacket))
+			uncleHashes      = make([]common.Hash, len(res.BlockBodiesPacket))
+			withdrawalHashes = make([]common.Hash, len(res.BlockBodiesPacket))
 		)
 		hasher := trie.NewStackTrie(nil)
 		for i, body := range res.BlockBodiesPacket {
 			txsHashes[i] = types.DeriveSha(types.Transactions(body.Transactions), hasher)
 			uncleHashes[i] = types.CalcUncleHash(body.Uncles)
+			if body.Withdrawals != nil {
+				withdrawalHashes[i] = types.DeriveSha(types.Withdrawals(body.Withdrawals), hasher)
+			}
 		}
-		return [][]common.Hash{txsHashes, uncleHashes}
+		return [][]common.Hash{txsHashes, uncleHashes, withdrawalHashes}
 	}
 	return peer.dispatchResponse(&Response{
 		id:   res.RequestId,
@@ -432,18 +434,38 @@ func handleReceipts66(backend Backend, msg Decoder, peer *Peer) error {
 	}, metadata)
 }
 
-func handleNewPooledTransactionHashes(backend Backend, msg Decoder, peer *Peer) error {
+func handleNewPooledTransactionHashes66(backend Backend, msg Decoder, peer *Peer) error {
 	// New transaction announcement arrived, make sure we have
 	// a valid and fresh chain to handle them
 	if !backend.AcceptTxs() {
 		return nil
 	}
-	ann := new(NewPooledTransactionHashesPacket)
+	ann := new(NewPooledTransactionHashesPacket66)
 	if err := msg.Decode(ann); err != nil {
 		return fmt.Errorf("%w: message %v: %v", errDecode, msg, err)
 	}
 	// Schedule all the unknown hashes for retrieval
 	for _, hash := range *ann {
+		peer.markTransaction(hash)
+	}
+	return backend.Handle(peer, ann)
+}
+
+func handleNewPooledTransactionHashes68(backend Backend, msg Decoder, peer *Peer) error {
+	// New transaction announcement arrived, make sure we have
+	// a valid and fresh chain to handle them
+	if !backend.AcceptTxs() {
+		return nil
+	}
+	ann := new(NewPooledTransactionHashesPacket68)
+	if err := msg.Decode(ann); err != nil {
+		return fmt.Errorf("%w: message %v: %v", errDecode, msg, err)
+	}
+	if len(ann.Hashes) != len(ann.Types) || len(ann.Hashes) != len(ann.Sizes) {
+		return fmt.Errorf("%w: message %v: invalid len of fields: %v %v %v", errDecode, msg, len(ann.Hashes), len(ann.Types), len(ann.Sizes))
+	}
+	// Schedule all the unknown hashes for retrieval
+	for _, hash := range ann.Hashes {
 		peer.markTransaction(hash)
 	}
 	return backend.Handle(peer, ann)
@@ -476,7 +498,7 @@ func answerGetPooledTransactions(backend Backend, query GetPooledTransactionsPac
 			continue
 		}
 		// If known, encode and queue for response packet
-		if encoded, err := rlp.EncodeToBytes(tx); err != nil {
+		if encoded, err := rlp.EncodeToBytes(tx.Tx); err != nil {
 			log.Error("Failed to encode transaction", "err", err)
 		} else {
 			hashes = append(hashes, hash)
@@ -527,93 +549,4 @@ func handlePooledTransactions66(backend Backend, msg Decoder, peer *Peer) error 
 	requestTracker.Fulfil(peer.id, peer.version, PooledTransactionsMsg, txs.RequestId)
 
 	return backend.Handle(peer, &txs.PooledTransactionsPacket)
-}
-
-func handleGetHealthCheck(backend Backend, msg Decoder, peer *Peer) error {
-	var query GetHealthCheckPacket66
-	if err := msg.Decode(&query); err != nil {
-		return fmt.Errorf("%w: message %v: %v", errDecode, msg, err)
-	}
-	res := ServiceGetHealthCheck(backend, peer)
-
-	return peer.ReplyHealthCheckRLP(query.RequestId, res)
-}
-
-func ServiceGetHealthCheck(backend Backend, peer *Peer) *HealthCheckPacket {
-	res := &HealthCheckPacket{}
-	block := backend.Chain().CurrentBlock()
-	res.BlockNumber = block.Number()
-	res.BlockHash = block.Hash().String()
-	res.ChainId = backend.Chain().Config().ChainID.String()
-
-	//res.Validator = backend.Chain().Validator().ValidateAddress()
-	res.SyncMode = backend.GetSyncMode()
-
-	nodes := backend.PeerInfos()
-	for _, node := range nodes {
-		res.Peers = append(res.Peers, node.String())
-	}
-
-	return res
-}
-
-func handleHealthCheck(backend Backend, msg Decoder, peer *Peer) error {
-	// A batch of headers arrived to one of our previous requests
-	res := new(HealthCheckPacket66)
-	if err := msg.Decode(res); err != nil {
-		return fmt.Errorf("%w: message %v: %v", errDecode, msg, err)
-	}
-
-	return peer.dispatchResponse(&Response{
-		id:   res.RequestId,
-		code: HealthCheckMsg,
-		Res:  &res.HealthCheckPacket,
-	}, nil)
-}
-
-func handleBridgeMsg(backend Backend, msg Decoder, peer *Peer) error {
-	res := new(BridgeMsgPacket66)
-	if err := msg.Decode(res); err != nil {
-		return fmt.Errorf("%w: message %v: %v", errDecode, msg, err)
-	}
-
-	data := res.BridgeMsgPacket
-	self := backend.HandlerBridgeMsg(data, peer)
-	if self {
-		peer.Log().Debug("Bridge message to self , we handle ", "id", data.Id)
-		resMsg := res.Msg
-		if resMsg != nil {
-			askMsg := resMsg.MSG()
-			answerMsg, err := handleBridgeMessage(backend, askMsg, peer)
-			if err != nil {
-				peer.Log().Warn("Bridge handle message has err", "err", err.Error())
-				return nil
-			}
-			data.BridgeType = Answer
-			data.SetMsg(answerMsg)
-			peer.Log().Debug("Answer bridge msg ", "id", data.Id, "code", data.Msg.Code)
-			// send answer message
-			backend.HandlerBridgeMsg(data, peer)
-		} else {
-			peer.Log().Warn("Bridge handle msg is empty , discard")
-		}
-	}
-
-	return nil
-}
-
-func handleBridgeMessage(backend Backend, msg *p2p.Msg, peer *Peer) (*p2p.Msg, error) {
-	peer.Log().Debug("Handle bridge message", "code", msg.Code)
-	switch msg.Code {
-	case BridgeGetHealthCheckMsg:
-		res := ServiceGetHealthCheck(backend, peer)
-		size, r, err := rlp.EncodeToReader(res)
-		if err != nil {
-			return nil, err
-		}
-		resMsg := &p2p.Msg{Code: BridgeGetHealthCheckMsg, Size: uint32(size), Payload: r}
-		return resMsg, nil
-	default:
-		return nil, errors.New("code not found")
-	}
 }
